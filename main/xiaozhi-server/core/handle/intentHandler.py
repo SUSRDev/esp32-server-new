@@ -22,6 +22,10 @@ async def handle_user_intent(conn, text):
     if await checkWakeupWords(conn, filtered_text):
         return True
 
+    # QA_SEARCH_KEYWORD_SHORTCUT: 「X是什么/是谁」优先联网搜索，避免误点歌
+    if await check_qa_search_intent(conn, text):
+        return True
+
     # ONLINE_MUSIC_KEYWORD_SHORTCUT: ChatGLM often prints tool name instead of calling it
     if await check_online_music_intent(conn, text):
         return True
@@ -125,6 +129,24 @@ async def process_intent_result(conn, intent_result, original_text):
             function_name = intent_data["function_call"]["name"]
             if function_name == "continue_chat":
                 return False
+
+            # REMAP_QA_PLAY_MUSIC: 「是什么/是谁」绝不能走点歌
+            import re as _re_qa
+            _ot = (original_text or "").strip()
+            if function_name == "play_music" and _re_qa.search(
+                r"(是什么|是谁|什么是|谁是|人物介绍|简介)", _ot
+            ):
+                _q = _re_qa.sub(r"[\s。！？!?，,\.😔]+$", "", _ot)
+                _q = _re_qa.sub(r"^(什么是|谁是|介绍一下|介绍下)", "", _q)
+                _q = _re_qa.sub(r"(是什么|是谁|人物介绍|简介)$", "", _q).strip() or _ot
+                if _q.lower() in ("mr", "野兽先生"):
+                    _q = "MrBeast"
+                if _q in ("十眠",):
+                    _q = "失眠"
+                function_name = "web_search"
+                intent_data["function_call"]["name"] = "web_search"
+                intent_data["function_call"]["arguments"] = {"query": _q, "limit": 6}
+                conn.logger.bind(tag=TAG).info(f"REMAP play_music->web_search q={_q!r}")
 
             # LLM 偶尔把选歌写成假函数 choose；映射到 pending 播放
             if function_name in ("choose", "select_song", "play_pending", "select_music"):
@@ -260,6 +282,97 @@ def speak_txt(conn, text):
 
 
 
+
+
+async def check_qa_search_intent(conn, text):
+    """问句直连联网搜索：避免「X是什么/是谁」被误判成点歌或空百科。"""
+    import re
+
+    raw = (text or "").strip()
+    clean = re.sub(r"[\s。！？!?，,\.😔]+$", "", raw)
+    if re.search(r"(我想听|我要听|播放|点歌|来一首|放一首)", clean):
+        return False
+
+    query = None
+    m = re.match(r"^(?:联网|连网|上网)?搜索\s*(.+)$", clean)
+    if m:
+        query = m.group(1).strip()
+    else:
+        m2 = re.match(r"^(?:什么是|谁是|介绍一下|介绍下|讲讲|说说)\s*(.+)$", clean)
+        m3 = re.match(r"^(.+?)(?:是什么|是谁|是干嘛的|人物介绍|简介)$", clean)
+        if m2:
+            query = m2.group(1).strip()
+        elif m3:
+            query = m3.group(1).strip()
+    if not query:
+        return False
+
+    query = re.sub(r"^(给我|帮我|请|一下)\s*", "", query)
+    query = re.sub(r"(的人物介绍|人物介绍|简介|介绍)$", "", query).strip()
+    query = re.sub(r"[。！？!?，,\.😔]+$", "", query).strip()
+    if not query or len(query) > 40:
+        return False
+
+    aliases = {
+        "野兽先生": "MrBeast 野兽先生",
+        "mr": "MrBeast",
+        "MR": "MrBeast",
+        "十眠": "失眠 歌曲",
+        "初音": "初音未来",
+    }
+    query = aliases.get(query, aliases.get(query.lower(), query))
+    if str(query).lower().startswith("mr") and len(str(query)) <= 12:
+        query = "MrBeast"
+
+    conn.logger.bind(tag=TAG).info(f"关键词命中问答搜索: query={query!r}")
+    await send_stt_message(conn, raw)
+    conn.client_abort = False
+    if not conn.func_handler:
+        return False
+    if not conn.func_handler.get_function("web_search"):
+        try:
+            conn.func_handler.function_registry.register_function("web_search")
+            conn.func_handler.upload_functions_desc()
+        except Exception:
+            pass
+
+    def _run():
+        conn.dialogue.put(Message(role="user", content=raw))
+        return conn.func_handler.handle_llm_function_call(
+            conn,
+            {
+                "name": "web_search",
+                "id": str(uuid.uuid4().hex),
+                "arguments": json.dumps({"query": query, "limit": 6}, ensure_ascii=False),
+            },
+        )
+
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(None, _run)
+        action = getattr(result, "action", None)
+        if action == Action.RESPONSE:
+            speak_txt(
+                conn,
+                getattr(result, "response", None)
+                or getattr(result, "result", "")
+                or "",
+            )
+        elif action == Action.REQLLM:
+            text2 = getattr(result, "result", None) or getattr(result, "response", "") or ""
+            if text2:
+                conn.dialogue.put(Message(role="tool", content=text2))
+                llm_result = None
+                try:
+                    if getattr(conn, "intent", None):
+                        llm_result = conn.intent.replyResult(text2, raw)
+                except Exception:
+                    llm_result = None
+                speak_txt(conn, llm_result or text2[:220])
+        conn.logger.bind(tag=TAG).info(f"问答搜索已触发: {query}, result={action}")
+        return True
+    except Exception as e:
+        conn.logger.bind(tag=TAG).error(f"问答搜索失败: {e}")
+        return False
 
 
 async def check_server_ops_intent(conn, text):
@@ -445,6 +558,9 @@ async def check_online_music_intent(conn, text):
                 artist, song = left, right
 
     song = re.sub(r"^(一下|歌曲|音乐)\s*", "", song or "").strip()
+    # EMOJI_STRIP_SONG
+    song = re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9\s\-\'《》]+", "", song or "").strip()
+    artist = re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9\s\-\'《》]+", "", artist or "").strip()
     if not song and not artist:
         song = "晴天"
     if len((song or "") + (artist or "")) > 50:

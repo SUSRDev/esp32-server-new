@@ -618,9 +618,35 @@ def _dedupe_rank(items: List[Dict], limit: int) -> List[Dict]:
     return out
 
 
+
+def _normalize_search_query(query: str) -> str:
+    """清洗口语搜索词，纠正常见 ASR/别名。"""
+    q = (query or "").strip()
+    q = re.sub(r"^(联网|连网|上网)?搜索\s*", "", q)
+    q = re.sub(r"(的人物介绍|人物介绍|简介|介绍一下|是谁|是什么|给我他的人物介绍)$", "", q).strip()
+    q = re.sub(r"给我他的?", "", q)
+    q = re.sub(r"^(给我|帮我|请|一下)\s*", "", q)
+    q = re.sub(r"[。！？!?，,\.😔]+$", "", q).strip()
+    low = q.lower().strip()
+    # mr / mrxxx 口语短称 → MrBeast
+    if low in ("mr", "m r") or re.fullmatch(r"mr[\s\-_.]*", low) or low.startswith("mr给我"):
+        return "MrBeast"
+    aliases = {
+        "mr": "MrBeast",
+        "野兽先生": "MrBeast",
+        "mrbeast": "MrBeast",
+        "十眠": "失眠",
+        "初音": "初音未来 Hatsune Miku",
+    }
+    if low in aliases:
+        q = aliases[low]
+    elif q in aliases:
+        q = aliases[q]
+    return q.strip() or (query or "").strip()
+
 @register_function("web_search", WEB_SEARCH_FUNCTION_DESC, ToolType.SYSTEM_CTL)
 def web_search(conn, query: str, limit: int = 6):
-    query = (query or "").strip()
+    query = _normalize_search_query(query)
     if not query:
         return ActionResponse(Action.REQLLM, "搜索词为空，请告诉我要查什么", None)
     try:

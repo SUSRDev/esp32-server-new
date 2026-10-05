@@ -509,6 +509,10 @@ async def handle_online_song_command(conn, song_name, artist="", choose=None, so
         if not song_name or song_name in ("random", "None"):
             song_name = "" if artist else "晴天"
         song_name = (song_name or "").strip()
+        # EMOJI_CLEAN_SONG
+        import re as _re_em
+        song_name = _re_em.sub(r"[^\u4e00-\u9fa5A-Za-z0-9\s\-_'《》]+", "", song_name).strip()
+        artist = _re_em.sub(r"[^\u4e00-\u9fa5A-Za-z0-9\s\-_'《》]+", "", artist or "").strip()
 
         query = juice_music.build_search_keyword(song_name, artist)
         conn.logger.bind(tag=TAG).info(

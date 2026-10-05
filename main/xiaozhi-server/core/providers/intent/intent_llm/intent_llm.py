@@ -95,6 +95,10 @@ class IntentProvider(IntentProviderBase):
             "1. 只返回JSON格式，不要包含任何其他文字\n"
             '2. 如果没有找到匹配的函数，返回{"function_call": {"name": "continue_chat"}}\n'
             "3. 确保返回的JSON格式正确，包含所有必要的字段\n"
+            "4. 用户说X是什么/是谁/介绍一下：必须 wiki_lookup 或 web_search，禁止 play_music\n"
+            "5. 只有明确我想听/播放/点歌才调用 play_music；问歌是什么意思也走搜索\n"
+            "6. 人物介绍/联网搜索：web_search，query只要核心词（如 MrBeast）\n"
+            # QA_NOT_MUSIC_RULE
             "特殊说明：\n"
             "- 当用户单次输入包含多个指令时（如'打开灯并且调高音量'）\n"
             "- 请返回多个function_call组成的JSON数组\n"
